@@ -27,5 +27,5 @@ urlpatterns = [
     
     path('razorpay/', RazorpayPaymentView.as_view(), name="razorpay_payment"),
     path('payment-success/', payment_success, name="payment_success"),
-
+    path('verify-email/<uidb64>/<token>/', views.verify_email, name='verify_email'),
     ]

@@ -14,6 +14,15 @@ from .recommendation_engine import get_collaborative_recommendations
 from .forms import UserRatingForm
 import razorpay
 from django.views.decorators.csrf import csrf_exempt
+from django.contrib.sites.shortcuts import get_current_site
+from django.utils.http import urlsafe_base64_encode
+from django.utils.encoding import force_bytes
+from django.core.mail import send_mail
+from django.urls import reverse
+from .tokens import email_verification_token 
+from django.utils.http import urlsafe_base64_decode
+from django.contrib.auth import get_user_model
+
 class EcomMixin(object):
     def dispatch(self, request, *args, **kwargs):
         cart_id = request.session.get("cart_id")
@@ -210,7 +219,7 @@ class Checkoutview(EcomMixin,CreateView):
         else:
             return redirect("ecomapp:home")
         return super().form_valid(form)
-
+    
 class Registrationview(CreateView):
     template_name = "registration.html"
     form_class = Registrationform
@@ -221,39 +230,67 @@ class Registrationview(CreateView):
         password = form.cleaned_data.get("password")
         email = form.cleaned_data.get("email")
         user = User.objects.create_user(username, email, password)
+        user.is_active = False  # Deactivate until email is verified
+        user.save()
+
         form.instance.user = user
-        login(self.request, user)
-        return super().form_valid(form)
+
+        # Send verification email
+        current_site = get_current_site(self.request)
+        uid = urlsafe_base64_encode(force_bytes(user.pk))
+        token = email_verification_token.make_token(user)
+        link = f"http://{current_site.domain}/verify-email/{uid}/{token}/"
+
+        send_mail(
+            subject="Verify your Smartshop account",
+            message=f"Hi {username},\n\nClick the link to verify your email:\n{link}",
+            from_email="youremail@example.com",
+            recipient_list=[email],
+            fail_silently=False,
+        )
+
+        return HttpResponse("Check your email to verify your account.")
 
     def get_success_url(self):
         if "next" in self.request.GET:
-            next_url = self.request.GET.get("next")
-            return next_url
-        else:
-            return self.success_url
+            return self.request.GET.get("next")
+        return self.success_url
 class Loginview(FormView):
     template_name = "login.html"
     form_class = Loginform
     success_url = reverse_lazy("ecomapp:home")
 
-    # form_valid method is a type of post method and is available in createview formview and updateview
     def form_valid(self, form):
         uname = form.cleaned_data.get("username")
         pword = form.cleaned_data["password"]
         usr = authenticate(username=uname, password=pword)
-        if usr is not None and Customer.objects.filter(user=usr).exists():
-            login(self.request, usr)
+
+        if usr is not None:
+            if not usr.is_active:
+                return render(self.request, self.template_name, {
+                    "form": self.form_class,
+                    "error": "Your email is not verified. Please check your inbox."
+                })
+
+            if Customer.objects.filter(user=usr).exists():
+                login(self.request, usr)
+            else:
+                return render(self.request, self.template_name, {
+                    "form": self.form_class,
+                    "error": "No customer profile found. Please register first."
+                })
         else:
-            return render(self.request, self.template_name, {"form": self.form_class, "error": "cannot find account on the registered username,please register first"})
+            return render(self.request, self.template_name, {
+                "form": self.form_class,
+                "error": "Invalid username or password."
+            })
 
         return super().form_valid(form)
 
     def get_success_url(self):
         if "next" in self.request.GET:
-            next_url = self.request.GET.get("next")
-            return next_url
-        else:
-            return self.success_url
+            return self.request.GET.get("next")
+        return self.success_url
 
 class Logoutview(View):
     def get(self, request):
@@ -408,6 +445,19 @@ def payment_success(request):
     return render(request, 'payment_success.html')
 
 
+def verify_email(request, uidb64, token):
+    User = get_user_model()
+    try:
+        uid = urlsafe_base64_decode(uidb64).decode()
+        user = User.objects.get(pk=uid)
+    except (TypeError, ValueError, OverflowError, User.DoesNotExist):
+        user = None
 
+    if user and email_verification_token.check_token(user, token):
+        user.is_active = True
+        user.save()
+        return HttpResponse("Email verified successfully.")
+    else:
+        return HttpResponse("Verification link is invalid or expired.")
 
 
